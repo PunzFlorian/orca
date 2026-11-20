@@ -1,6 +1,7 @@
 import { nativeChatMessageCopyText } from '../messages/native-chat-message-copy-text'
 import { expect, it } from 'vitest'
 import type { NativeChatMessage } from '../../native-chat-types'
+import { withoutSentImagePromptMarkers } from './native-chat-sent-image-prompt-markers'
 import { normalizeImageTranscriptMessages } from './native-chat-image-transcript-markers'
 
 function userRow(id: string, text: string): NativeChatMessage {
@@ -125,4 +126,81 @@ it('preserves a human note inside a caption beside an image with no path', () =>
     ]
   }
   expect(nativeChatMessageCopyText(message)).toBe(text)
+})
+
+it.each([
+  '[Image source file: "/temp/a.png"; attached viewing copy: "/temp/a.png"]',
+  '[Image source file: "/repo/a.png"; attached viewing copy: "\\u002ftemp/a.png"]',
+  '`[Image source file: "/repo/a.png"; attached viewing copy: "/temp/a.png"]`',
+  '```text\n[Image source file: "/repo/a.png"; attached viewing copy: "/temp/a.png"]\n```',
+  '\'[Image source file: "/repo/a.png"; attached viewing copy: "/temp/a.png"]\'',
+  '> [Image source file: "/repo/a.png"; attached viewing copy: "/temp/a.png"]'
+])('preserves a literal note the writer cannot emit as an unquoted context: %s', (text) => {
+  const message = {
+    ...userRow('literal-note', text),
+    blocks: [
+      { type: 'image-ref' as const, path: '/temp/a.png' },
+      { type: 'text' as const, text }
+    ]
+  }
+  expect(nativeChatMessageCopyText(message)).toBe(text)
+})
+
+it('preserves the original journal body independently of a provider projection sharing its blocks', () => {
+  const text = 'Why [Image source file: "/repo/a.png"; attached viewing copy: "/temp/a.png"] here?'
+  const provider: NativeChatMessage = {
+    ...userRow('provider', text),
+    blocks: [
+      { type: 'image-ref', path: '/temp/a.png' },
+      { type: 'text', text }
+    ]
+  }
+  const original = {
+    ...provider,
+    id: 'orca:original-send',
+    journalPosition: { sequence: 1, index: 0 }
+  }
+  expect(nativeChatMessageCopyText(provider)).toBe('Why  here?')
+  expect(nativeChatMessageCopyText(original)).toBe(text)
+  expect(nativeChatMessageCopyText(provider)).toBe('Why  here?')
+})
+
+it.each([
+  '[Image #1] [Image source file: "/repo/a.png"; attached viewing copy: "/temp/a.png"] [Image source file: "/repo/b.png"; attached viewing copy: "/temp/b.png"] Describe',
+  'Describe [Image source file: "/repo/a.png"; attached viewing copy: "/temp/a.png"] [Image source file: "/repo/b.png"; attached viewing copy: "/temp/b.png"] '
+])('handles the full edge run for pathless images: %s', (text) => {
+  const message: NativeChatMessage = {
+    ...userRow('pathless-run', text),
+    blocks: [{ type: 'image-ref' }, { type: 'image-ref' }, { type: 'text', text }]
+  }
+  expect(nativeChatMessageCopyText(message)).toBe('Describe')
+})
+
+it('does not treat text-block splitting as proof that a middle note was generated', () => {
+  const message: NativeChatMessage = {
+    ...userRow('split-note', ''),
+    blocks: [
+      { type: 'image-ref' },
+      { type: 'text', text: 'Why' },
+      {
+        type: 'text',
+        text: '[Image source file: "/repo/a.png"; attached viewing copy: "/temp/a.png"]'
+      },
+      { type: 'text', text: 'here?' }
+    ]
+  }
+  expect(withoutSentImagePromptMarkers(message)).toEqual(message.blocks)
+})
+
+it.each([
+  [
+    '/temp/a.png Describe this\n\n[Image source file: "/repo/a.png"; attached viewing copy: "/temp/a.png"]',
+    '/temp/a.png Describe this'
+  ],
+  [
+    '/temp/view\\ image.png [Image source file: "/repo/a.png"; attached viewing copy: "/temp/view image.png"]',
+    '/temp/view\\ image.png'
+  ]
+])('handles the existing legacy path envelope: %s', (text, expected) => {
+  expect(nativeChatMessageCopyText(userRow('legacy-envelope', text))).toBe(expected)
 })

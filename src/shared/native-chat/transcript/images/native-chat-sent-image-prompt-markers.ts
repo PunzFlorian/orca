@@ -1,3 +1,4 @@
+import { parseAgentJournalItemKey } from '../../../agent-session/journal/agent-session-journal-item-key'
 import { withoutAgentImageSourceContexts } from './native-chat-image-source-context'
 import { NATIVE_CHAT_QUOTED_FILE_REFERENCE } from '../../input/composer/agent-image-paste'
 import {
@@ -148,22 +149,26 @@ export function offsetSentImagePromptMarkers(
 
 // Keyed by block array so downstream row-content caches keep hitting across renders.
 const withoutSentMarkers = new WeakMap<readonly NativeChatBlock[], NativeChatBlock[]>()
+const withoutOriginalSentMarkers = new WeakMap<readonly NativeChatBlock[], NativeChatBlock[]>()
 
 /** A user message's blocks without the `[Image #k]` markers its send wrote; its images already show above the words. */
 export function withoutSentImagePromptMarkers(
-  message: Pick<NativeChatMessage, 'role' | 'blocks'>
+  message: Pick<NativeChatMessage, 'role' | 'blocks'> & Partial<Pick<NativeChatMessage, 'id'>>
 ): NativeChatBlock[] {
   if (message.role !== 'user') {
     return message.blocks
   }
-  const cached = withoutSentMarkers.get(message.blocks)
+  const original =
+    message.id?.startsWith('orca:') && parseAgentJournalItemKey(message.id)?.provider === 'orca'
+  const cache = original ? withoutOriginalSentMarkers : withoutSentMarkers
+  const cached = cache.get(message.blocks)
   if (cached) {
     return cached
   }
-  const sourceBlocks = withoutAgentImageSourceContexts(message.blocks)
+  const sourceBlocks = message.blocks
   const images = sourceBlocks.filter((block) => block.type === 'image-ref')
   const imageCount = images.length
-  let changed = sourceBlocks !== message.blocks
+  let changed = false
   const blocks = sourceBlocks.flatMap((block): NativeChatBlock[] => {
     if (!isTextBlock(block)) {
       return [block]
@@ -177,8 +182,9 @@ export function withoutSentImagePromptMarkers(
     const text = stripped.replace(EDGE_BLANK_LINES, '')
     return text.trim() ? [{ ...block, text }] : []
   })
-  const result = changed ? blocks : message.blocks
-  withoutSentMarkers.set(message.blocks, result)
+  const markerBlocks = changed ? blocks : message.blocks
+  const result = original ? markerBlocks : withoutAgentImageSourceContexts(markerBlocks)
+  cache.set(message.blocks, result)
   return result
 }
 
