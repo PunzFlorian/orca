@@ -154,7 +154,7 @@ describe('a bot_requests table made before status', () => {
 
       const after = new OrchestrationDb(path)
       try {
-        expect(after.getBotRequest('msg_old')).toEqual({
+        expect(after.getBotRequest('msg_old')).toMatchObject({
           message_id: 'msg_old',
           root_key: 'root',
           from_bot_id: 'ranger',

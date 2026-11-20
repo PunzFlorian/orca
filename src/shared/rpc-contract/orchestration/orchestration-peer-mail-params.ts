@@ -38,7 +38,9 @@ export const PeerMailDeliverParams = z.object({
   item: OptionalString,
   /** With `item`: files the sender uploaded to this Orca's attachment store for the item's chat. */
   attachments: z.array(z.string().min(1).max(4096)).max(30).optional(),
-  sender: PeerMailSender.optional()
+  sender: PeerMailSender.optional(),
+  /** The sender's asker takes one notice per unanswered question; absent from earlier builds. */
+  questionNotice: z.literal('once').optional()
 })
 
 /** The opening Orca pulls replies queued for its conversations; waits up to waitMs for one. */

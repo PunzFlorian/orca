@@ -10,8 +10,11 @@ import {
   botAnswerView,
   botRequestAnswerRef,
   botRequestSenderName,
-  botRequestUnansweredText
+  botRequestUnansweredText,
+  type BotRequestUnansweredWhy
 } from '../../../../../bots/bot-request-view'
+import { runLifecycleWriteTransaction } from '../../../../orchestration/db/lifecycle-write-transaction-runner'
+import { noteBotRequestFailureReason, reconcileBotRequestTakes } from './bot-request-take-reconcile'
 import { OrchestrationError } from '../../../../orchestration/orchestration-error'
 import { botOfSession } from '../../../../../bots/bot-session-tabs'
 import { awaitsAnswer } from '../../../../../bots/bot-request-policy'
@@ -126,8 +129,11 @@ export async function settleBotRequestFailure(
     return
   }
   const error = await readChatRequestError(failure)
+  noteBotRequestFailureReason(failure.sessionId, error?.text)
   const why = (await continuesAfterUsageLimit(failure.sessionId)) ? 'failed-continues' : 'failed'
   await settleBotRequests(runtime, failure.sessionId, why, error?.text)
+  // Its rest may already have been read without the reason; a decided request stays decided.
+  await reconcileBotRequestTakes(runtime, failure.sessionId)
 }
 
 async function settleBotRequests(
@@ -142,7 +148,10 @@ async function settleBotRequests(
   }
   const db = runtime.getOrchestrationDb()
   const { turn } = await readBotTurn(runtime, db, sessionId)
-  const open = turn.requestIds.filter((id) => db.getBotRequestOutcome(id) === null)
+  // Requests under the new rule are decided by the chat's rest instead (bot-request-take-reconcile).
+  const open = turn.requestIds.filter(
+    (id) => db.getBotRequestOutcome(id) === null && db.getBotRequest(id)?.debt_rule !== 1
+  )
   if (open.length === 0) {
     return
   }
@@ -154,7 +163,11 @@ async function settleBotRequests(
   await ensureSenderRecords(runtime, messages)
   for (const message of messages) {
     if (message) {
-      tellSender(runtime, db, message, 'unanswered', why, reason)
+      tellSender(runtime, db, message, {
+        outcome: 'unanswered',
+        why,
+        ...(reason ? { reason } : {})
+      })
     }
   }
 }
@@ -182,7 +195,7 @@ export async function dropUnreadBotRequests(
       .filter((message) => !onlyTo || message.to_handle.endsWith(onlyTo))
     await ensureSenderRecords(runtime, dropped)
     for (const message of dropped) {
-      if (tellSender(runtime, db, message, 'dropped', why)) {
+      if (tellSender(runtime, db, message, { outcome: 'dropped', why })) {
         db.markAsRead([message.id])
       }
     }
@@ -193,7 +206,7 @@ export async function dropUnreadBotRequests(
 }
 
 // Session senders resolve against the session records, which a restart leaves uninstalled until asked.
-async function ensureSenderRecords(
+export async function ensureSenderRecords(
   runtime: OrcaRuntimeService,
   requests: readonly (MessageRow | null | undefined)[]
 ): Promise<void> {
@@ -202,66 +215,77 @@ async function ensureSenderRecords(
   }
 }
 
-/** False leaves the request as it was: its sender cannot be verified yet, so a later end retries. */
-function tellSender(
+/** How a request's sender is told once. `takenBy`: the chat that took it must still hold it, so a
+ *  decision made before a newer take or an answer commits nothing. `once`: the new rule's wording. */
+export type BotRequestTelling = {
+  outcome: BotRequestOutcome
+  why: BotRequestUnansweredWhy
+  reason?: string
+  takenBy?: string
+  once?: boolean
+}
+
+/** False leaves the request as it was: its sender cannot be verified yet, so a later end retries.
+ *  The outcome and its mail, or the paired computer's relay row, commit together; the wake after. */
+export function tellSender(
   runtime: OrcaRuntimeService,
   db: OrchestrationDb,
   request: MessageRow,
-  outcome: BotRequestOutcome,
-  why: Parameters<typeof botRequestUnansweredText>[1],
-  reason?: string
+  telling: BotRequestTelling
 ): boolean {
   const record = botRequestRecord(db, request.id)
   if (!record || !awaitsAnswer(record.purpose)) {
     return true
   }
-  const body = botRequestUnansweredText(record, why, reason)
-  if (tellPeerSender(runtime, db, request, outcome, body)) {
+  const body = botRequestUnansweredText(record, telling.why, telling.reason, telling.once)
+  const owed = () =>
+    telling.takenBy === undefined
+      ? db.getBotRequestOutcome(request.id) === null
+      : db.holdsBotRequestTake(request.id, telling.takenBy)
+  const route = db.getPeerMailMessage(request.id)
+  const conversation = route ? db.getPeerMailConversation(route.conversation_id) : undefined
+  if (conversation?.role === 'peer') {
+    // A request from a paired computer is told over the conversation it came on, from the bot's own address.
+    const queued = runLifecycleWriteTransaction(db.db, 'tell_peer_bot_request_sender', () => {
+      if (!owed() || !db.recordBotRequestOutcome(request.id, telling.outcome)) {
+        return false
+      }
+      queuePeerMailReply(db, conversation.conversation_id, generateId('msg'), {
+        senderLabel: peerMailSenderLabel(runtime, request.to_handle),
+        fromAddress: request.to_handle,
+        subject: `Re: ${request.subject}`,
+        body,
+        threadId: request.thread_id ?? request.id,
+        sender: peerMailSender(runtime, request.to_handle)
+      })
+      return true
+    })
+    if (queued) {
+      notifyPeerMailQueued(db.db)
+    }
     return true
   }
   const sender = reachableSender(runtime, db, request)
   if (sender === 'unverified') {
     return false
   }
-  if (!db.recordBotRequestOutcome(request.id, outcome) || sender === 'gone') {
-    return true
-  }
-  const recipient = sender
-  const told = db.insertMessage({
-    from: request.to_handle,
-    to: recipient.to,
-    subject: `Re: ${request.subject}`,
-    body,
-    threadId: request.thread_id ?? request.id,
-    runId: recipient.runId
+  const told = runLifecycleWriteTransaction(db.db, 'tell_bot_request_sender', () => {
+    if (!owed() || !db.recordBotRequestOutcome(request.id, telling.outcome)) {
+      return null
+    }
+    return sender === 'gone'
+      ? null
+      : db.insertMessage({
+          from: request.to_handle,
+          to: sender.to,
+          subject: `Re: ${request.subject}`,
+          body,
+          threadId: request.thread_id ?? request.id,
+          runId: sender.runId
+        })
   })
-  runtime.notifyMessageArrived(told.to_handle, told.type)
-  return true
-}
-
-/** A request from a paired computer is told over the conversation it came on, from the bot's own address. */
-function tellPeerSender(
-  runtime: OrcaRuntimeService,
-  db: OrchestrationDb,
-  request: MessageRow,
-  outcome: BotRequestOutcome,
-  body: string
-): boolean {
-  const route = db.getPeerMailMessage(request.id)
-  const conversation = route ? db.getPeerMailConversation(route.conversation_id) : undefined
-  if (conversation?.role !== 'peer') {
-    return false
-  }
-  if (db.recordBotRequestOutcome(request.id, outcome)) {
-    queuePeerMailReply(db, conversation.conversation_id, generateId('msg'), {
-      senderLabel: peerMailSenderLabel(runtime, request.to_handle),
-      fromAddress: request.to_handle,
-      subject: `Re: ${request.subject}`,
-      body,
-      threadId: request.thread_id ?? request.id,
-      sender: peerMailSender(runtime, request.to_handle)
-    })
-    notifyPeerMailQueued(db.db)
+  if (told) {
+    runtime.notifyMessageArrived(told.to_handle, told.type)
   }
   return true
 }

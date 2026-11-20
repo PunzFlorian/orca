@@ -11,6 +11,7 @@ import { admitInOwnConversation, sessionAddress } from './bot-request-conversati
 import { actsForOwner } from '../../../../../../shared/bots/bot-acts-for'
 import { ownerChatCard } from './bot-request-owner-card'
 import { botRequestPayload, type BotRequestRecord } from '../../../../../bots/bot-request-view'
+import { botRequestBlockedReceipt } from './bot-request-blocked-receipt'
 import type { BotRequestAdmission } from '../../../../orchestration/db/bot-requests/bot-request-store'
 import {
   BOT_REQUEST_TYPE_REFUSAL,
@@ -74,7 +75,7 @@ export async function sendToBot(
     /** About something in the addressed chat (a comment on its item): lands there, a teammate's
      *  request included, instead of in a conversation of its own. */
     keepChat?: boolean
-  } & Pick<SendBotRequestArgs, 'senderSnapshot' | 'images'>
+  } & Pick<SendBotRequestArgs, 'senderSnapshot' | 'images' | 'fromPeer'>
 ): Promise<{ receipt: unknown; nudge: () => void } | null> {
   const { runtime } = context
   const db = runtime.getOrchestrationDb()
@@ -129,6 +130,8 @@ type SendBotRequestArgs = {
   images?: readonly string[]
   /** Nudges the sender runs later instead of now. */
   held?: (() => void)[]
+  /** From a paired computer: the one-notice rule waits until its way back is filed. */
+  fromPeer?: true
 }
 
 /** Every refusal, from the first check to a blocked admission, leaves the owner's card. */
@@ -215,19 +218,8 @@ async function admitBotRequestMail(
     toBotId: target.id,
     purpose
   }
-  const blockedReceipt = (
-    blocked: Exclude<BotRequestAdmission, { kind: 'sent' }>
-  ): { sent: false; receipt: unknown } => {
-    const earlier = db.getMessageById(blocked.messageId)
-    return {
-      sent: false,
-      receipt: {
-        ...(earlier ? { message: exposeMessage(earlier) } : {}),
-        duplicate: true,
-        next: `${target.name} already has this request, so no second message was sent.`
-      }
-    }
-  }
+  const blockedReceipt = (blocked: Exclude<BotRequestAdmission, { kind: 'sent' }>) =>
+    botRequestBlockedReceipt(db, blocked, target.name)
   const messageId = args.messageId ?? generateId('msg')
   // Checked before a conversation is made for it; the store checks again as it stores.
   const blocked = db.botRequestBlocked(key)
@@ -240,7 +232,8 @@ async function admitBotRequestMail(
     ...key,
     fromBotId: record.fromBotId,
     depth: record.depth,
-    record: JSON.stringify(record)
+    record: JSON.stringify(record),
+    debtRule: !args.fromPeer
   }
   /** `reserved`: the request's place is already held, so only its mail is stored. */
   /** `held`: the chat a failed turn holds that this request was kept out of, named to the sender. */

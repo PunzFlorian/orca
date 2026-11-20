@@ -101,7 +101,9 @@ export class StructuredAgentSessionClientDelivery {
         (await this.journalProjection(sessionId, journal))?.state ?? null,
       readChildWork: (sessionId) => this.statusFeed.readChildWork(sessionId),
       readAsyncQuestionsSkippedThrough: (sessionId) =>
-        this.deps().store.getRecord(sessionId)?.asyncQuestionsSkippedThrough
+        this.deps().store.getRecord(sessionId)?.asyncQuestionsSkippedThrough,
+      readUsageLimitCut: (sessionId) => this.readUsageLimitCut(sessionId),
+      readUsageLimitContinue
     })
     this.sendSettlement = new StructuredAgentSessionSendSettlement((sessionId) =>
       this.settlementReading(sessionId, this.requireJournal(sessionId))
@@ -162,7 +164,11 @@ export class StructuredAgentSessionClientDelivery {
 
   publishStatus = (sessionId: string): void => {
     this.statusFeed.publish(sessionId)
+    // A schedule or setting a rest depends on may have changed with no journal row.
+    this.turnCompletionFeed.restMayChange(sessionId)
   }
+
+  readQuestionRest = (sessionId: string) => this.turnCompletionFeed.readQuestionRest(sessionId)
 
   publishConversationName = (sessionId: string): void =>
     this.statusFeed.publishConversationName(sessionId)

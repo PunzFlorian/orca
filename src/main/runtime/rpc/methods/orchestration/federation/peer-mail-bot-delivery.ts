@@ -4,6 +4,7 @@ import type { OrcaRuntimeService } from '../../../../orca-runtime'
 import { OrchestrationError } from '../../../../orchestration/orchestration-error'
 import { routeBotMail } from '../messaging/bot-chat-address'
 import { mayReachBot } from '../messaging/bot-request-send'
+import { reconcileBotRequestTakes } from '../messaging/bot-request-take-reconcile'
 
 // Deliveries being admitted on this Orca, by message id.
 const admitting = new Set<string>()
@@ -46,9 +47,20 @@ export async function deliverPeerMailToBot(
       { effectsApplied: false, retryable: true }
     )
   }
+  // A sender that tells its asker once per question (`questionNotice`) gets that rule here, from the
+  // moment the way back is filed; one that predates it keeps the earlier rule.
+  const adoptOneNotice = () => {
+    if (params.questionNotice === 'once') {
+      const taken = db.adoptBotRequestDebtRule(params.messageId)
+      if (taken) {
+        void reconcileBotRequestTakes(runtime, taken)
+      }
+    }
+  }
   // Stored by an attempt that ended before linking it: a duplicate, never a second request.
   if (db.getMessageById(params.messageId)) {
     link()
+    adoptOneNotice()
     return 'delivered'
   }
   // A restart while a chat was made for it can leave its request held with no mail; nothing is in flight now.
@@ -73,7 +85,8 @@ export async function deliverPeerMailToBot(
         sender,
         routing: { run: undefined },
         messageId: params.messageId,
-        senderSnapshot
+        senderSnapshot,
+        fromPeer: true
       }
     )
     if (!('receipt' in routed)) {
@@ -81,6 +94,7 @@ export async function deliverPeerMailToBot(
     }
     // Its reply and any notice go back over this conversation.
     link()
+    adoptOneNotice()
     return 'delivered'
   } finally {
     admitting.delete(params.messageId)

@@ -41,7 +41,9 @@ export class CheckMailReconciliation {
   constructor(
     private readonly runtime: OrcaRuntimeService,
     private readonly db: OrchestrationDb,
-    private readonly signal?: AbortSignal
+    private readonly signal?: AbortSignal,
+    /** The chat whose turn runs this check: questions it takes are decided at its next rest. */
+    private readonly takerSessionId: string | null = null
   ) {}
 
   dispose(): void {
@@ -222,7 +224,9 @@ export class CheckMailReconciliation {
       ...args,
       direct: true,
       finalize: (messages) => {
-        this.db.markAsRead(messages.map((message) => message.id))
+        const ids = messages.map((message) => message.id)
+        this.db.markAsRead(ids)
+        this.db.noteBotRequestsChecked(ids, this.takerSessionId)
         const response = args.respond(messages)
         args.record?.(response)
         return response
@@ -268,6 +272,10 @@ export class CheckMailReconciliation {
       finalize: (messages) => {
         const batch = this.db.finalizeMailboxDelivery({ ...args.mailbox, claim, messages })
         if (batch) {
+          this.db.noteBotRequestsChecked(
+            batch.messages.map((message) => message.id),
+            this.takerSessionId
+          )
           batch.finalResponse = args.respond(batch)
         }
         if (batch) {

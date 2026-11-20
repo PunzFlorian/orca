@@ -46,6 +46,7 @@ export abstract class RuntimeOrchestrationDatabaseAccess extends OrcaRuntimeWith
       this.orchestrationDbMaintenance.start()
       this.bindMailHandBack(this._orchestrationDb)
       this.bindCrewChanges(this._orchestrationDb)
+      db.botRequestTakenListener = (sessionId) => this.botSessions.rested?.(sessionId)
       this.ensureOrchestrationFederationRelay()
       this.scheduleRestoredMessageRepoints()
       this.bindWorkerTerminalAutoRelease(this._orchestrationDb)

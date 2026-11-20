@@ -167,7 +167,8 @@ export async function deliverPeerMail(
       ...(message.chat ? { chat: message.chat } : {}),
       ...(message.item ? { item: message.item } : {}),
       ...(message.attachments?.length ? { attachments: message.attachments } : {}),
-      sender: message.sender
+      sender: message.sender,
+      questionNotice: 'once'
     },
     DELIVER_TIMEOUT_MS,
     undefined,

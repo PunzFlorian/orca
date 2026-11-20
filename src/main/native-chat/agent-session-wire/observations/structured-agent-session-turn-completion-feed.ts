@@ -21,6 +21,8 @@ import {
 } from '../../../../shared/agent-status/child-work/agent-status-child-work-liveness'
 import type { StructuredAgentSessionLatestRequest } from '../../../../shared/agent-session/requests/structured-agent-session-latest-request'
 import type { AgentSessionJournal } from '../../agent-session-journal/journal-store'
+import type { HostUsageLimitCut } from '../recovery/structured-agent-session-usage-limit-chain'
+import type { AgentSessionStatusSummary } from '../../../../shared/agent-session/agent-session-wire'
 import type {
   StructuredAgentSessionStatusState,
   StructuredAgentSessionJournalProjection
@@ -35,7 +37,22 @@ export type StructuredAgentSessionTurnCompletionSubscriber = {
   onState?: (state: StructuredAttentionState) => void
   /** The session closed; a turn it was running ends with no completion. */
   onClosed?: (sessionId: string) => void
+  /** The session may have come to rest: every observation at rest, whatever its outcome, and every
+   *  status publish. Subscribers decide on their own read; repeats are expected. */
+  onRest?: (sessionId: string) => void
 }
+
+/** Whether a chat's main agent has stopped: nothing running, owed or held by live work. */
+export type StructuredAgentSessionRest =
+  | { kind: 'busy' }
+  | { kind: 'rest'; outcome: AgentSessionTurnCompletion['outcome'] | null }
+
+/** A chat's rest as an agent question's asker needs it: a failed turn Orca will continue itself
+ *  (a usage limit) is still on the question, and a chat with no live session has stopped. */
+export type StructuredAgentSessionQuestionRest =
+  | StructuredAgentSessionRest
+  | { kind: 'continuing' }
+  | { kind: 'closed' }
 
 type CompletionFeedCursor = { epoch: string; sequence: number }
 
@@ -55,6 +72,11 @@ export type StructuredAgentSessionTurnCompletionFeedDeps = {
   readChildWork: (sessionId: string) => readonly AgentChildWorkLivenessCandidate[] | undefined
   /** The person's Skip on the chat's async questions, saved on its record. */
   readAsyncQuestionsSkippedThrough?: (sessionId: string) => string | undefined
+  readUsageLimitCut?: (sessionId: string) => Promise<HostUsageLimitCut | null>
+  readUsageLimitContinue?: (
+    sessionId: string,
+    cut: HostUsageLimitCut | null
+  ) => AgentSessionStatusSummary['usageLimitContinue']
 }
 
 type RequestMark = Pick<StructuredAgentSessionLatestRequest, 'kind' | 'id'>
@@ -160,6 +182,9 @@ export class StructuredAgentSessionTurnCompletionFeed {
       return
     }
     baseline.sequence = cursor.sequence
+    if (this.restOf(sessionId, state).kind === 'rest') {
+      this.restMayChange(sessionId)
+    }
     const raised = state.pendingPromptIds.find((id) => !baseline.prompts.has(id))
     baseline.prompts = prompts
     const completion = this.settledCompletion(sessionId, session, state, baseline)
@@ -187,6 +212,46 @@ export class StructuredAgentSessionTurnCompletionFeed {
       },
       'prompt-aware'
     )
+  }
+
+  /** At rest when no turn runs, no send is owed and no live work holds a finished turn open. */
+  restOf(sessionId: string, state: StructuredAgentSessionStatusState): StructuredAgentSessionRest {
+    const request = state.latestRequest
+    if (
+      request?.turnState === 'running' ||
+      state.owesWork ||
+      (request && this.heldByLiveWork(sessionId, state, request))
+    ) {
+      return { kind: 'busy' }
+    }
+    return { kind: 'rest', outcome: request?.outcome ?? null }
+  }
+
+  /** Read now, never cached; null when the journal can't be read, which decides nothing. */
+  async readQuestionRest(sessionId: string): Promise<StructuredAgentSessionQuestionRest | null> {
+    if (!this.deps.sessions.has(sessionId)) {
+      return { kind: 'closed' }
+    }
+    const state = await this.deps.readStatusState(sessionId)
+    const rest = state ? this.restOf(sessionId, state) : null
+    if (rest?.kind !== 'rest' || rest.outcome !== 'failure') {
+      return rest
+    }
+    const cut = (await this.deps.readUsageLimitCut?.(sessionId)) ?? null
+    return this.deps.readUsageLimitContinue?.(sessionId, cut)?.state === 'scheduled'
+      ? { kind: 'continuing' }
+      : rest
+  }
+
+  /** Something a rest depends on changed without a journal row (a usage-limit schedule). */
+  restMayChange(sessionId: string): void {
+    for (const subscriber of this.subscribers.values()) {
+      try {
+        subscriber.onRest?.(sessionId)
+      } catch {
+        // One subscriber's bookkeeping cannot cost another its rest.
+      }
+    }
   }
 
   private publishState(
