@@ -21,7 +21,7 @@ export abstract class RuntimeBotConstructionHooks extends RuntimeConstructionSer
   // The open item a finished worker's report was started for, from this host's item store.
   protected structuredMailReportItem?: StructuredMailReportItem
 
-  // The runtime's bot session work: questions a chat took are decided at its rest (bot-turn-ended).
+  // Session hooks: questions a chat took are decided at its rest.
   abstract get botSessions(): BotSessionHooks
 
   // The chat's bound conversation and whether its answer to this mail lands there; null if unbound.

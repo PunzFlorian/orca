@@ -162,7 +162,7 @@ export const ORCHESTRATION_REPLY_METHOD = defineOrchestrationMethod({
       terminalRecipient
     })
     const replyFrom = params.from ?? original.to_handle
-    // A bot request's answer and its mail commit together: a crash between them can't keep both.
+    // An answer and its mail commit together, so a crash can't keep only one.
     const reply = runLifecycleWriteTransaction(db.db, 'reply_message', () => {
       const stored = db.insertMessage({
         from: replyFrom,
@@ -175,7 +175,7 @@ export const ORCHESTRATION_REPLY_METHOD = defineOrchestrationMethod({
         body: params.body,
         threadId: original.thread_id ?? original.id,
         runId: recipient.runId,
-        // Refuses a second answer to a bot request, before the original is marked read.
+        // Refuses a second answer, before the original is marked read.
         payload: botAnswerPayload(db, original)
       })
       db.markAsRead([original.id])

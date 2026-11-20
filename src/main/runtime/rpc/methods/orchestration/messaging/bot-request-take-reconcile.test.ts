@@ -43,9 +43,11 @@ describe('an agent question owes its asker one outcome', () => {
   let runtime: OrcaRuntimeService
   let rest: StructuredAgentSessionQuestionRest
   let offered: Set<string>
+  let continues: boolean
   const reader = {
     readQuestionRest: async () => rest,
-    offeredCuts: async () => new Map([...offered].map((id) => [id, {}]))
+    offeredCuts: async () => new Map([...offered].map((id) => [id, {}])),
+    willContinue: async () => continues
   }
 
   beforeEach(() => {
@@ -53,7 +55,8 @@ describe('an agent question owes its asker one outcome', () => {
     acting.requestIds = []
     rest = { kind: 'rest', outcome: 'success' }
     offered = new Set()
-    // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: these functions read only the db, the bot list and the mail nudge.
+    continues = false
+    // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: these functions read only the db, the agent list and the mail nudge.
     runtime = {
       getOrchestrationDb: () => db,
       bots: { list: () => [{ id: 'docs' }] },
@@ -138,14 +141,17 @@ describe('an agent question owes its asker one outcome', () => {
     expect(db.getBotRequestOutcome(second)).toBe('unanswered')
   })
 
-  it('waits while the chat works, owes a turn, will be continued, or awaits a Continue', async () => {
+  it('waits while the chat works, will be continued after a usage limit, or awaits a Continue', async () => {
     const id = ask()
     take(id)
-    for (const state of [{ kind: 'busy' }, { kind: 'continuing' }] as const) {
+    rest = { kind: 'busy' }
+    await reconcileBotRequestTakes(runtime, CHAT, reader)
+    continues = true
+    for (const state of [{ kind: 'rest', outcome: 'failure' }, { kind: 'closed' }] as const) {
       rest = state
       await reconcileBotRequestTakes(runtime, CHAT, reader)
     }
-    rest = { kind: 'closed' }
+    continues = false
     offered.add(CHAT)
     await reconcileBotRequestTakes(runtime, CHAT, reader)
     expect(notices()).toEqual([])

@@ -229,7 +229,7 @@ export const BOT_METHODS = [
         await composioBotsOf(runtime).willDelete(bot.id)
         await forgetDeletedBotTools(runtime, bot)
       }
-      // Read while the bot is here; its chats' questions are decided once they are gone.
+      // Read before the delete; its chats' questions are decided once they are gone.
       const holding = runtime
         .getOrchestrationDb()
         .listSessionsWithOpenBotRequestTakesFor(params.botId)

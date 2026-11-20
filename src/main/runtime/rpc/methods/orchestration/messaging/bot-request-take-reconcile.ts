@@ -1,7 +1,4 @@
-/** An agent question is owed its asker an answer or one notice. The chat that took it decides it at
- *  its first rest after the take: answered by then, or the asker is told once, whatever made the chat
- *  stop. One decision for every edge (a turn end of any outcome, a stop, a closed or deleted chat,
- *  a usage-limit continue given up, a dismissed restart, Orca starting): each only asks for it. */
+// An agent question is decided at the first rest of the chat that took it: answered, or its asker told once.
 
 import type { BotRequestRow } from '../../../../orchestration/db/bot-requests/bot-request-store'
 import type { OrcaRuntimeService } from '../../../../orca-runtime'
@@ -14,6 +11,8 @@ type QuestionRestReader = {
   readQuestionRest: (sessionId: string) => Promise<StructuredAgentSessionQuestionRest | null>
   /** Chats cut by a restart whose Continue still waits on a person. */
   offeredCuts: () => Promise<ReadonlyMap<string, unknown>>
+  /** Orca will continue the chat itself after a usage limit, loaded or not. */
+  willContinue: (sessionId: string) => Promise<boolean>
 }
 
 // One decision per chat at a time; an edge during it asks for one more after.
@@ -22,8 +21,12 @@ const deciding = new Map<string, { again: boolean; done: Promise<void> }>()
 const failureReasons = new Map<string, string>()
 
 /** A chat's request failed: its notice, if one is owed, says why. */
-export function noteBotRequestFailureReason(sessionId: string, reason: string | undefined): void {
-  if (reason) {
+export function noteBotRequestFailureReason(
+  runtime: OrcaRuntimeService,
+  sessionId: string,
+  reason: string | undefined
+): void {
+  if (reason && runtime.getOrchestrationDb().listOpenBotRequestTakes(sessionId).length > 0) {
     failureReasons.set(sessionId, reason)
   } else {
     failureReasons.delete(sessionId)
@@ -97,6 +100,7 @@ async function decide(
   const messages = due.map(({ take }) => db.getMessageById(take.message_id))
   await ensureSenderRecords(runtime, messages)
   const reason = failureReasons.get(sessionId)
+  failureReasons.delete(sessionId)
   due.forEach(({ why }, index) => {
     const message = messages[index]
     if (message) {
@@ -111,17 +115,19 @@ async function decide(
   })
 }
 
-/** Why the chat stopped without answering; null while it may still answer (a turn running or owed,
- *  live work, a continue Orca will send, or a restart Continue a person has yet to decide). */
+/** Why the chat stopped without answering; null while it may still answer. */
 async function restWhy(
   reader: QuestionRestReader,
   sessionId: string
 ): Promise<BotRequestUnansweredWhy | null> {
   const rest = await reader.readQuestionRest(sessionId)
-  if (!rest || rest.kind === 'busy' || rest.kind === 'continuing') {
+  if (!rest || rest.kind === 'busy' || (await reader.offeredCuts()).has(sessionId)) {
     return null
   }
-  if ((await reader.offeredCuts()).has(sessionId)) {
+  if (
+    (rest.kind === 'closed' || rest.outcome === 'failure') &&
+    (await reader.willContinue(sessionId))
+  ) {
     return null
   }
   if (rest.kind === 'closed') {
@@ -139,7 +145,8 @@ function hostRestReader(): QuestionRestReader | null {
   return host
     ? {
         readQuestionRest: (sessionId) => host.reads.questionRest(sessionId),
-        offeredCuts: () => host.restartResume.offeredCuts()
+        offeredCuts: () => host.restartResume.offeredCuts(),
+        willContinue: (sessionId) => host.usageLimitContinue.willContinue(sessionId)
       }
     : null
 }

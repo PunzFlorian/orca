@@ -67,7 +67,7 @@ export function listSessionsWithOpenBotRequestTakes(this: OrchestrationDb): stri
     )
 }
 
-/** The chats of one bot holding a question still owed an outcome: read before the bot goes. */
+/** The chats of one agent holding a question still owed an outcome: read before it is deleted. */
 export function listSessionsWithOpenBotRequestTakesFor(
   this: OrchestrationDb,
   toBotId: string
@@ -85,7 +85,14 @@ export function listSessionsWithOpenBotRequestTakesFor(
 
 /** A paired computer's request joins the new rule once its way back is filed. */
 export function adoptBotRequestDebtRule(this: OrchestrationDb, messageId: string): string | null {
-  this.db.prepare('UPDATE bot_requests SET debt_rule = 1 WHERE message_id = ?').run(messageId)
+  // Not one a terminal already read: that one stays on the earlier rule.
+  this.db
+    .prepare(
+      `UPDATE bot_requests SET debt_rule = 1 WHERE message_id = ?
+         AND (taken_session_id IS NOT NULL
+           OR NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = ? AND m.read = 1))`
+    )
+    .run(messageId, messageId)
   const row = this.db
     .prepare('SELECT taken_session_id FROM bot_requests WHERE message_id = ?')
     .get(messageId)

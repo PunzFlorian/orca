@@ -54,7 +54,7 @@ export async function replyOverPeerMail(args: {
   }
 
   if (conversation.role === 'peer') {
-    // A bot request's answer and its relay row commit together.
+    // An answer and its relay row commit together.
     runLifecycleWriteTransaction(db.db, 'peer_reply_message', () => {
       queuePeerMailReply(db, conversation.conversation_id, id, {
         senderLabel,
@@ -63,7 +63,7 @@ export async function replyOverPeerMail(args: {
         body: params.body,
         threadId,
         sender: peerMailSender(runtime, replier),
-        // Refuses a second answer to a bot request, before the original is marked read.
+        // Refuses a second answer, before the original is marked read.
         ...botAnswerOf(db, original)
       })
       db.markAsRead([original.id])

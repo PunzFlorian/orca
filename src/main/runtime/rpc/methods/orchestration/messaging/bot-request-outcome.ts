@@ -98,7 +98,9 @@ export async function noteBotRequestPost(
 ): Promise<void> {
   const db = runtime.getOrchestrationDb()
   const { turn } = await readBotTurn(runtime, db, sessionId)
-  for (const requestId of turn.requestIds) {
+  // Questions the chat read with `check` are not prompt items of its turn.
+  const taken = db.listOpenBotRequestTakes(sessionId).map((row) => row.message_id)
+  for (const requestId of new Set([...turn.requestIds, ...taken])) {
     const record = botRequestRecord(db, requestId)
     const answerRef = record ? botRequestAnswerRef(record) : null
     // A message ref in the thread starts with the thread's ref.
@@ -129,7 +131,7 @@ export async function settleBotRequestFailure(
     return
   }
   const error = await readChatRequestError(failure)
-  noteBotRequestFailureReason(failure.sessionId, error?.text)
+  noteBotRequestFailureReason(runtime, failure.sessionId, error?.text)
   const why = (await continuesAfterUsageLimit(failure.sessionId)) ? 'failed-continues' : 'failed'
   await settleBotRequests(runtime, failure.sessionId, why, error?.text)
   // Its rest may already have been read without the reason; a decided request stays decided.
@@ -148,7 +150,7 @@ async function settleBotRequests(
   }
   const db = runtime.getOrchestrationDb()
   const { turn } = await readBotTurn(runtime, db, sessionId)
-  // Requests under the new rule are decided by the chat's rest instead (bot-request-take-reconcile).
+  // Requests under the new rule are decided by the chat's rest instead.
   const open = turn.requestIds.filter(
     (id) => db.getBotRequestOutcome(id) === null && db.getBotRequest(id)?.debt_rule !== 1
   )
@@ -215,8 +217,7 @@ export async function ensureSenderRecords(
   }
 }
 
-/** How a request's sender is told once. `takenBy`: the chat that took it must still hold it, so a
- *  decision made before a newer take or an answer commits nothing. `once`: the new rule's wording. */
+/** `takenBy` fences the notice on the take it decided; `once` picks the new rule's wording. */
 export type BotRequestTelling = {
   outcome: BotRequestOutcome
   why: BotRequestUnansweredWhy
@@ -225,8 +226,7 @@ export type BotRequestTelling = {
   once?: boolean
 }
 
-/** False leaves the request as it was: its sender cannot be verified yet, so a later end retries.
- *  The outcome and its mail, or the paired computer's relay row, commit together; the wake after. */
+/** The outcome commits with its mail or relay row; false when the sender can't be verified yet. */
 export function tellSender(
   runtime: OrcaRuntimeService,
   db: OrchestrationDb,
@@ -245,7 +245,7 @@ export function tellSender(
   const route = db.getPeerMailMessage(request.id)
   const conversation = route ? db.getPeerMailConversation(route.conversation_id) : undefined
   if (conversation?.role === 'peer') {
-    // A request from a paired computer is told over the conversation it came on, from the bot's own address.
+    // A paired computer's request is told over the conversation it came on.
     const queued = runLifecycleWriteTransaction(db.db, 'tell_peer_bot_request_sender', () => {
       if (!owed() || !db.recordBotRequestOutcome(request.id, telling.outcome)) {
         return false

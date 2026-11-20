@@ -101,9 +101,7 @@ export class StructuredAgentSessionClientDelivery {
         (await this.journalProjection(sessionId, journal))?.state ?? null,
       readChildWork: (sessionId) => this.statusFeed.readChildWork(sessionId),
       readAsyncQuestionsSkippedThrough: (sessionId) =>
-        this.deps().store.getRecord(sessionId)?.asyncQuestionsSkippedThrough,
-      readUsageLimitCut: (sessionId) => this.readUsageLimitCut(sessionId),
-      readUsageLimitContinue
+        this.deps().store.getRecord(sessionId)?.asyncQuestionsSkippedThrough
     })
     this.sendSettlement = new StructuredAgentSessionSendSettlement((sessionId) =>
       this.settlementReading(sessionId, this.requireJournal(sessionId))

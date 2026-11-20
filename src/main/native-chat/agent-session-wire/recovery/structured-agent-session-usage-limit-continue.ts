@@ -101,6 +101,25 @@ export class StructuredAgentSessionUsageLimitContinue {
     this.holds.retain(shown)
   }
 
+  /** Orca will send this chat's continue itself, loaded or not, with its reset known or not. */
+  willContinue = async (id: string): Promise<boolean> => {
+    const cut = await this.cold.read(id, true).catch(() => null)
+    return cut !== null && this.stateOf(id, cut) === 'scheduled'
+  }
+
+  private stateOf(id: string, cut: HostUsageLimitCut) {
+    const cancel = this.deps.host.store.getRecord(id)?.usageLimitContinueCancel
+    const attempt = this.attempts.get(id)
+    return cancel?.turnItemId === cut.turnItemId && cancel.resetsAt === cut.resetsAt
+      ? 'cancelled'
+      : cut.chain >= USAGE_LIMIT_CONTINUE_CHAIN_LIMIT ||
+          (attempt?.identity === identity(cut) && (attempt.count >= 5 || attempt.unconfirmed))
+        ? 'failed'
+        : this.eligible(id, cut)
+          ? 'scheduled'
+          : 'off'
+  }
+
   readState = (
     id: string,
     cut: HostUsageLimitCut | null
@@ -110,17 +129,7 @@ export class StructuredAgentSessionUsageLimitContinue {
       return undefined
     }
     const hold = this.holds.verdict(id, cut, this.deps.now())
-    const cancel = this.deps.host.store.getRecord(id)?.usageLimitContinueCancel
-    const attempt = this.attempts.get(id)
-    const state =
-      cancel?.turnItemId === cut.turnItemId && cancel.resetsAt === cut.resetsAt
-        ? 'cancelled'
-        : cut.chain >= USAGE_LIMIT_CONTINUE_CHAIN_LIMIT ||
-            (attempt?.identity === identity(cut) && (attempt.count >= 5 || attempt.unconfirmed))
-          ? 'failed'
-          : this.eligible(id, cut)
-            ? 'scheduled'
-            : 'off'
+    const state = this.stateOf(id, cut)
     // An unknown reset has no time to promise, yet fresh room still releases it: say nothing.
     if (hold.unknownReset && state === 'scheduled') {
       return undefined

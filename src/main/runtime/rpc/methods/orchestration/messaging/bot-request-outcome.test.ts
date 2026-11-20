@@ -63,7 +63,7 @@ describe('how a bot request ends', () => {
     db = new OrchestrationDb(':memory:')
     notified.length = 0
     acting.requestIds = []
-    // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: these functions read only the db, the bot list and the mail nudge.
+    // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: these functions read only the db, the agent list and the mail nudge.
     runtime = {
       getOrchestrationDb: () => db,
       bots: { list: () => [{ id: 'docs' }] },
@@ -122,6 +122,14 @@ describe('how a bot request ends', () => {
     expect(db.getBotRequestOutcome(id)).toBe('posted')
     const payload = botAnswerPayload(db, db.getMessageById(id)!)!
     expect(JSON.parse(payload).botAnswer.next).toMatch(/don't post it again/)
+  })
+
+  it('notes a post for a request the chat read with check, not just its prompts', async () => {
+    const id = request()
+    db.db.prepare('UPDATE bot_requests SET debt_rule = 1 WHERE message_id = ?').run(id)
+    db.noteBotRequestsChecked([id], 'docs-session')
+    await noteBotRequestPost(runtime, 'docs-session', 'slack:T1:C1:1712.1:1712.9')
+    expect(db.getBotRequestOutcome(id)).toBe('posted')
   })
 
   it('wakes the sender once when a turn on the request ends with no answer', async () => {

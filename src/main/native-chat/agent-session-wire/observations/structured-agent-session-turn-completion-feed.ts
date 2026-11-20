@@ -21,8 +21,6 @@ import {
 } from '../../../../shared/agent-status/child-work/agent-status-child-work-liveness'
 import type { StructuredAgentSessionLatestRequest } from '../../../../shared/agent-session/requests/structured-agent-session-latest-request'
 import type { AgentSessionJournal } from '../../agent-session-journal/journal-store'
-import type { HostUsageLimitCut } from '../recovery/structured-agent-session-usage-limit-chain'
-import type { AgentSessionStatusSummary } from '../../../../shared/agent-session/agent-session-wire'
 import type {
   StructuredAgentSessionStatusState,
   StructuredAgentSessionJournalProjection
@@ -47,12 +45,8 @@ export type StructuredAgentSessionRest =
   | { kind: 'busy' }
   | { kind: 'rest'; outcome: AgentSessionTurnCompletion['outcome'] | null }
 
-/** A chat's rest as an agent question's asker needs it: a failed turn Orca will continue itself
- *  (a usage limit) is still on the question, and a chat with no live session has stopped. */
-export type StructuredAgentSessionQuestionRest =
-  | StructuredAgentSessionRest
-  | { kind: 'continuing' }
-  | { kind: 'closed' }
+/** A chat with no loaded session reads as closed. */
+export type StructuredAgentSessionQuestionRest = StructuredAgentSessionRest | { kind: 'closed' }
 
 type CompletionFeedCursor = { epoch: string; sequence: number }
 
@@ -72,11 +66,6 @@ export type StructuredAgentSessionTurnCompletionFeedDeps = {
   readChildWork: (sessionId: string) => readonly AgentChildWorkLivenessCandidate[] | undefined
   /** The person's Skip on the chat's async questions, saved on its record. */
   readAsyncQuestionsSkippedThrough?: (sessionId: string) => string | undefined
-  readUsageLimitCut?: (sessionId: string) => Promise<HostUsageLimitCut | null>
-  readUsageLimitContinue?: (
-    sessionId: string,
-    cut: HostUsageLimitCut | null
-  ) => AgentSessionStatusSummary['usageLimitContinue']
 }
 
 type RequestMark = Pick<StructuredAgentSessionLatestRequest, 'kind' | 'id'>
@@ -233,14 +222,7 @@ export class StructuredAgentSessionTurnCompletionFeed {
       return { kind: 'closed' }
     }
     const state = await this.deps.readStatusState(sessionId)
-    const rest = state ? this.restOf(sessionId, state) : null
-    if (rest?.kind !== 'rest' || rest.outcome !== 'failure') {
-      return rest
-    }
-    const cut = (await this.deps.readUsageLimitCut?.(sessionId)) ?? null
-    return this.deps.readUsageLimitContinue?.(sessionId, cut)?.state === 'scheduled'
-      ? { kind: 'continuing' }
-      : rest
+    return state ? this.restOf(sessionId, state) : null
   }
 
   /** Something a rest depends on changed without a journal row (a usage-limit schedule). */

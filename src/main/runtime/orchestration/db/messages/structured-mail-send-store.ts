@@ -193,8 +193,7 @@ export function retireStructuredMailSend(
   this: OrchestrationDb,
   row: StructuredMailSendRow,
   consumed: boolean,
-  /** Who took it whole: the chat's agent, or the person who withdrew it. Agent questions note it with
-   *  the read, so the chat's next rest decides them. */
+  /** Who took it whole: the chat's agent, or the person who withdrew it. */
   takenBy?: 'agent' | 'person'
 ): boolean {
   let taken = false
