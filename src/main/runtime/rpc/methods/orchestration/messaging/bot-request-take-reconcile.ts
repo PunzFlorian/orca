@@ -5,7 +5,7 @@ import type { OrcaRuntimeService } from '../../../../orca-runtime'
 import type { BotRequestUnansweredWhy } from '../../../../../bots/bot-request-view'
 import { getStructuredAgentSessionHost } from '../../../../../native-chat/agent-session-wire/host/structured-agent-session-registry'
 import type { StructuredAgentSessionQuestionRest } from '../../../../../native-chat/agent-session-wire/observations/structured-agent-session-turn-completion-feed'
-import { ensureSenderRecords, tellSender } from './bot-request-outcome'
+import { ensureSenderRecords, tellSender } from './bot-request-sender-notice'
 
 type QuestionRestReader = {
   readQuestionRest: (sessionId: string) => Promise<StructuredAgentSessionQuestionRest | null>

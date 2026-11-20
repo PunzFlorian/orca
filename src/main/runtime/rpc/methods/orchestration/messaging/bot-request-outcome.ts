@@ -4,36 +4,23 @@
 
 import type { MessageRow } from '../../../../orchestration/db/orchestration-records'
 import type { OrchestrationDb } from '../../../../orchestration/db/orchestration-db'
-import type { BotRequestOutcome } from '../../../../orchestration/db/bot-requests/bot-request-outcomes'
 import type { OrcaRuntimeService } from '../../../../orca-runtime'
 import {
   botAnswerView,
   botRequestAnswerRef,
-  botRequestSenderName,
-  botRequestUnansweredText,
-  type BotRequestUnansweredWhy
+  botRequestSenderName
 } from '../../../../../bots/bot-request-view'
-import { runLifecycleWriteTransaction } from '../../../../orchestration/db/lifecycle-write-transaction-runner'
-import { noteBotRequestFailureReason, reconcileBotRequestTakes } from './bot-request-take-reconcile'
+import { ensureSenderRecords, tellSender } from './bot-request-sender-notice'
 import { OrchestrationError } from '../../../../orchestration/orchestration-error'
-import { botOfSession } from '../../../../../bots/bot-session-tabs'
 import { awaitsAnswer } from '../../../../../bots/bot-request-policy'
+import { noteBotRequestFailureReason, reconcileBotRequestTakes } from './bot-request-take-reconcile'
+import { botOfSession } from '../../../../../bots/bot-session-tabs'
 import { readBotTurn } from './bot-recipient'
 import { botRequestRecord } from './bot-request-record'
-import { resolveReplyRecipient } from './recipient-routing'
-import { mayNameSession } from './session-recipient'
-import {
-  peerMailSender,
-  peerMailSenderLabel,
-  queuePeerMailReply
-} from '../../../../orchestration/federation/peer-mail/peer-mail-delivery'
-import { notifyPeerMailQueued } from '../../../../orchestration/federation/peer-mail/peer-mail-waiters'
-import { generateId } from '../../../../orchestration/db/generated-id'
 import { getStructuredAgentSessionHost } from '../../../../../native-chat/agent-session-wire/host/structured-agent-session-registry'
 import type { TurnEndedVerdict } from '../../../../../native-chat/agent-session-wire/structured-agent-session-turn-context'
 import type { StructuredAgentSessionRequestFailure } from '../../../../../native-chat/agent-session-wire/observations/structured-agent-session-request-failures'
 import { readChatRequestError } from '../../../../orchestration/workers/turn-stops/chat-request-error-read'
-import { readAgentSessionRecordStore } from '../../../../orchestration/addressing/session-lineage/structured-session-lineage'
 
 const ACTIVE_DISPATCH = new Set(['pending', 'dispatched'])
 
@@ -204,115 +191,5 @@ export async function dropUnreadBotRequests(
   } catch (error) {
     // The change itself stands; only the senders go untold.
     console.warn('[bots] could not tell senders of dropped bot requests', error)
-  }
-}
-
-// Session senders resolve against the session records, which a restart leaves uninstalled until asked.
-export async function ensureSenderRecords(
-  runtime: OrcaRuntimeService,
-  requests: readonly (MessageRow | null | undefined)[]
-): Promise<void> {
-  if (requests.some((request) => request && mayNameSession(request.from_handle))) {
-    await runtime.ensureStructuredAgentSessionHost().catch(() => undefined)
-  }
-}
-
-/** `takenBy` fences the notice on the take it decided; `once` picks the new rule's wording. */
-export type BotRequestTelling = {
-  outcome: BotRequestOutcome
-  why: BotRequestUnansweredWhy
-  reason?: string
-  takenBy?: string
-  once?: boolean
-}
-
-/** The outcome commits with its mail or relay row; false when the sender can't be verified yet. */
-export function tellSender(
-  runtime: OrcaRuntimeService,
-  db: OrchestrationDb,
-  request: MessageRow,
-  telling: BotRequestTelling
-): boolean {
-  const record = botRequestRecord(db, request.id)
-  if (!record || !awaitsAnswer(record.purpose)) {
-    return true
-  }
-  const body = botRequestUnansweredText(record, telling.why, telling.reason, telling.once)
-  const owed = () =>
-    telling.takenBy === undefined
-      ? db.getBotRequestOutcome(request.id) === null
-      : db.holdsBotRequestTake(request.id, telling.takenBy)
-  const route = db.getPeerMailMessage(request.id)
-  const conversation = route ? db.getPeerMailConversation(route.conversation_id) : undefined
-  if (conversation?.role === 'peer') {
-    // A paired computer's request is told over the conversation it came on.
-    const queued = runLifecycleWriteTransaction(db.db, 'tell_peer_bot_request_sender', () => {
-      if (!owed() || !db.recordBotRequestOutcome(request.id, telling.outcome)) {
-        return false
-      }
-      queuePeerMailReply(db, conversation.conversation_id, generateId('msg'), {
-        senderLabel: peerMailSenderLabel(runtime, request.to_handle),
-        fromAddress: request.to_handle,
-        subject: `Re: ${request.subject}`,
-        body,
-        threadId: request.thread_id ?? request.id,
-        sender: peerMailSender(runtime, request.to_handle)
-      })
-      return true
-    })
-    if (queued) {
-      notifyPeerMailQueued(db.db)
-    }
-    return true
-  }
-  const sender = reachableSender(runtime, db, request)
-  if (sender === 'unverified') {
-    return false
-  }
-  const told = runLifecycleWriteTransaction(db.db, 'tell_bot_request_sender', () => {
-    if (!owed() || !db.recordBotRequestOutcome(request.id, telling.outcome)) {
-      return null
-    }
-    return sender === 'gone'
-      ? null
-      : db.insertMessage({
-          from: request.to_handle,
-          to: sender.to,
-          subject: `Re: ${request.subject}`,
-          body,
-          threadId: request.thread_id ?? request.id,
-          runId: sender.runId
-        })
-  })
-  if (told) {
-    runtime.notifyMessageArrived(told.to_handle, told.type)
-  }
-  return true
-}
-
-// 'gone': the sender is proven closed, unknown or on another host, so nothing would read a notice.
-// 'unverified': the session records are not installed, which proves neither.
-function reachableSender(
-  runtime: OrcaRuntimeService,
-  db: OrchestrationDb,
-  request: MessageRow
-): ReturnType<typeof resolveReplyRecipient> | 'gone' | 'unverified' {
-  if (mayNameSession(request.from_handle) && !readAgentSessionRecordStore()) {
-    return 'unverified'
-  }
-  try {
-    return resolveReplyRecipient({
-      runtime,
-      db,
-      originalFrom: request.from_handle,
-      originalRunId: request.run_id,
-      // A bot request comes from a chat or a worker, never a terminal agent.
-      terminalRecipient: null
-    })
-  } catch (error) {
-    if (error instanceof OrchestrationError) {
-      return 'gone'
-    }
-    throw error
   }
 }
