@@ -24,6 +24,7 @@ function state(input: {
 describe('a chat coming to rest', () => {
   const feed = () =>
     new StructuredAgentSessionTurnCompletionFeed({
+      // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: the feed reads only a session's journal cursor and location.
       sessions: new Map([
         [
           'chat',
